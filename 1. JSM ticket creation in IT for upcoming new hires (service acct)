@@ -1,0 +1,423 @@
+// Configuration constants
+const SPREADSHEET_ID = '[spreadsheet id from google sheet]'; // Replace with your spreadsheet ID
+const SHEET_NAME = '[name of spreadsheet you are pulling the data from]';
+  
+// Jira details
+const JIRA_URL = 'https://[your atlassian subdomain].atlassian.net';
+const PROJECT_KEY = '[insert your jira project key here]';
+const API_TOKEN = '[your jira api key]';
+const EMAIL = '[email address of service account you are using]';
+
+// Column indices - keeping the explicit column references for clarity
+const COL_NEW_HIRE_NAME = 0;       // Column A - New Hire Name
+const COL_TITLE = 1;               // Column B - Title
+const COL_DIVISION = 2;            // Column C - Division
+const COL_DEPARTMENT = 3;          // Column D - Department
+const COL_EMPLOYMENT_TYPE = 5;     // Column F - Employment Type
+const COL_START_DATE = 6;          // Column G - Start Date
+const COL_ORIENTATION = 8;         // Column I - Orientation
+const COL_EMPLOYMENT_LOCATION = 9; // Column J - Employment Location
+const COL_DESK_ASSIGNMENT = 11;    // Column L - Desk Assignment
+const COL_PERSONAL_EMAIL = 16;     // Column Q - Personal Email
+const COL_ADDRESS = 17;            // Column R - Address
+const COL_LAPTOP_TYPE = 24;        // Column Y - Laptop Type
+const COL_STATUS = 25;             // Column Z - Status
+
+// The main function that will be triggered by a time-based trigger
+function createJiraTickets() {
+  Logger.log('Starting JIRA ticket creation process using service account');
+  
+  try {
+    // Access the spreadsheet by ID instead of the active spreadsheet
+    const spreadsheet = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheet = spreadsheet.getSheetByName(SHEET_NAME);
+    
+    if (!sheet) {
+      Logger.log(`Error: Sheet "${SHEET_NAME}" not found in the spreadsheet.`);
+      return;
+    }
+    
+    const data = sheet.getDataRange().getValues();
+    const today = new Date();
+    
+    for (let i = 3; i < data.length; i++) { // Skip first 3 rows (start from row 4)
+      const dateCell = data[i][COL_START_DATE]; // "Start Date" in Column G
+      const statusCell = data[i][COL_STATUS]; // "Status" in Column Z
+
+      Logger.log(`Processing row ${i + 1}: Start Date = ${dateCell}, Status = ${statusCell}`);
+      
+      if (statusCell !== 'Ticket Created' && dateCell instanceof Date) {
+        const daysDiff = (dateCell - today) / (1000 * 60 * 60 * 24); // Difference in days
+        Logger.log(`Row ${i + 1}: Days difference = ${daysDiff}`);
+        
+        if (daysDiff <= 15 && daysDiff > 0) { // Check if the date is 15 days away
+          // Extracting the required details from the respective columns with clear labels
+          const newHireName = data[i][COL_NEW_HIRE_NAME];         // Column A - New Hire Name
+          const title = data[i][COL_TITLE];                       // Column B - Title
+          const division = data[i][COL_DIVISION];                 // Column C - Division
+          const department = data[i][COL_DEPARTMENT];             // Column D - Department
+          const employmentType = data[i][COL_EMPLOYMENT_TYPE];    // Column F - Employment Type
+          const startDate = data[i][COL_START_DATE];              // Column G - Start Date
+          const orientation = data[i][COL_ORIENTATION];           // Column I - Orientation
+          const employmentLocation = data[i][COL_EMPLOYMENT_LOCATION]; // Column J - Employment Location
+          const deskAssignment = data[i][COL_DESK_ASSIGNMENT];    // Column L - Desk Assignment
+          const personalEmail = data[i][COL_PERSONAL_EMAIL];      // Column Q - Personal Email
+          const address = data[i][COL_ADDRESS];                   // Column R - Address
+          const laptopType = data[i][COL_LAPTOP_TYPE];            // Column Y - Laptop Type
+
+          // Creating the summary and description using the extracted details
+          const summary = `New Hire Notification: ${newHireName} - ${startDate.toDateString()}`;
+          const description = [
+            createSectionHeader("Basic Information"),
+            createParagraphWithBold('New Hire Name', newHireName),
+            createParagraphWithBold('Start Date', startDate.toDateString()),
+            createParagraphWithBold('Laptop Type', laptopType),
+            
+            createSectionHeader("Position Details"),
+            createParagraphWithBold('Title', title),
+            createParagraphWithBold('Division', division),
+            createParagraphWithBold('Department', department),
+            createParagraphWithBold('Employment Type', employmentType),
+
+            createSectionHeader("Work Details"),
+            createParagraphWithBold('Orientation', orientation),
+            createParagraphWithBold('Employment Location', employmentLocation),
+            createParagraphWithBold('Desk Assignment', deskAssignment),
+
+            createSectionHeader("Contact Information"),
+            createParagraphWithBold('Personal Email', personalEmail),
+            createParagraphWithBold('Address', address)
+          ];
+
+          const response = createJiraIssue(JIRA_URL, PROJECT_KEY, API_TOKEN, EMAIL, summary, description);
+          
+          if (response) {
+            Logger.log(`Ticket created successfully for row ${i + 1}`);
+            sheet.getRange(i + 1, COL_STATUS + 1).setValue('Ticket Created'); // Update status in Column Z
+          } else {
+            Logger.log(`Failed to create ticket for row ${i + 1}`);
+          }
+        } else {
+          Logger.log(`Row ${i + 1} does not meet the date criteria (15 days away).`);
+        }
+      } else {
+        Logger.log(`Row ${i + 1} skipped: Status is '${statusCell}' or Start Date is not a valid date.`);
+      }
+    }
+  } catch (error) {
+    Logger.log(`Error in script execution: ${error.toString()}`);
+    sendErrorEmail(error);
+  }
+}
+
+// Normal manual run - processes ONLY ROW 4 with normal status checking
+function manualRun() {
+  Logger.log('===== MANUAL RUN - PROCESSING ONLY ROW 4 WITH NORMAL STATUS CHECK =====');
+  
+  try {
+    const spreadsheet = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheet = spreadsheet.getSheetByName(SHEET_NAME);
+    
+    if (!sheet) {
+      Logger.log(`Error: Sheet "${SHEET_NAME}" not found in the spreadsheet.`);
+      return;
+    }
+    
+    const data = sheet.getDataRange().getValues();
+    
+    // Only process row 4 (index 3)
+    const rowIndex = 3;
+    
+    // Make sure row 4 exists
+    if (rowIndex >= data.length) {
+      Logger.log(`Error: Row 4 does not exist in the sheet.`);
+      return;
+    }
+    
+    const dateCell = data[rowIndex][COL_START_DATE];
+    const statusCell = data[rowIndex][COL_STATUS];
+    
+    Logger.log(`Processing ONLY row 4: Start Date = ${dateCell}, Status = ${statusCell}`);
+    
+    const today = new Date();
+    
+    // Only create ticket if status is not already 'Ticket Created'
+    if (statusCell !== 'Ticket Created' && dateCell instanceof Date) {
+      const daysDiff = (dateCell - today) / (1000 * 60 * 60 * 24);
+      Logger.log(`Row 4: Days difference = ${daysDiff}`);
+      
+      if (daysDiff <= 15 && daysDiff > 0) {
+        // Extract data from row 4
+        const newHireName = data[rowIndex][COL_NEW_HIRE_NAME];
+        const title = data[rowIndex][COL_TITLE];
+        const division = data[rowIndex][COL_DIVISION];
+        const department = data[rowIndex][COL_DEPARTMENT];
+        const employmentType = data[rowIndex][COL_EMPLOYMENT_TYPE];
+        const startDate = data[rowIndex][COL_START_DATE];
+        const orientation = data[rowIndex][COL_ORIENTATION];
+        const employmentLocation = data[rowIndex][COL_EMPLOYMENT_LOCATION];
+        const deskAssignment = data[rowIndex][COL_DESK_ASSIGNMENT];
+        const personalEmail = data[rowIndex][COL_PERSONAL_EMAIL];
+        const address = data[rowIndex][COL_ADDRESS];
+        const laptopType = data[rowIndex][COL_LAPTOP_TYPE];
+        
+        // Create ticket for row 4
+        const summary = `New Hire Notification: ${newHireName} - ${startDate.toDateString()}`;
+        const description = [
+          createSectionHeader("Basic Information"),
+          createParagraphWithBold('New Hire Name', newHireName),
+          createParagraphWithBold('Start Date', startDate.toDateString()),
+          createParagraphWithBold('Laptop Type', laptopType),
+          
+          createSectionHeader("Position Details"),
+          createParagraphWithBold('Title', title),
+          createParagraphWithBold('Division', division),
+          createParagraphWithBold('Department', department),
+          createParagraphWithBold('Employment Type', employmentType),
+
+          createSectionHeader("Work Details"),
+          createParagraphWithBold('Orientation', orientation),
+          createParagraphWithBold('Employment Location', employmentLocation),
+          createParagraphWithBold('Desk Assignment', deskAssignment),
+
+          createSectionHeader("Contact Information"),
+          createParagraphWithBold('Personal Email', personalEmail),
+          createParagraphWithBold('Address', address)
+        ];
+        
+        const response = createJiraIssue(JIRA_URL, PROJECT_KEY, API_TOKEN, EMAIL, summary, description);
+        
+        if (response) {
+          Logger.log(`Ticket created successfully for row 4`);
+          sheet.getRange(rowIndex + 1, COL_STATUS + 1).setValue('Ticket Created');
+        } else {
+          Logger.log(`Failed to create ticket for row 4`);
+        }
+      } else {
+        Logger.log(`Row 4 does not meet the date criteria (15 days away).`);
+      }
+    } else {
+      Logger.log(`Row 4 skipped: Status is '${statusCell}' or Start Date is not a valid date.`);
+    }
+  } catch (error) {
+    Logger.log(`Error in script execution: ${error.toString()}`);
+    sendErrorEmail(error);
+  }
+  
+  Logger.log('===== MANUAL RUN COMPLETED - ONLY ROW 4 WAS PROCESSED =====');
+}
+
+// Forced manual run - processes ONLY ROW 4 regardless of status
+function manualRunForced() {
+  Logger.log('===== FORCED MANUAL RUN - PROCESSING ONLY ROW 4 REGARDLESS OF STATUS =====');
+  
+  try {
+    const spreadsheet = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheet = spreadsheet.getSheetByName(SHEET_NAME);
+    
+    if (!sheet) {
+      Logger.log(`Error: Sheet "${SHEET_NAME}" not found in the spreadsheet.`);
+      return;
+    }
+    
+    const data = sheet.getDataRange().getValues();
+    
+    // Only process row 4 (index 3)
+    const rowIndex = 3;
+    
+    // Make sure row 4 exists
+    if (rowIndex >= data.length) {
+      Logger.log(`Error: Row 4 does not exist in the sheet.`);
+      return;
+    }
+    
+    const dateCell = data[rowIndex][COL_START_DATE];
+    const statusCell = data[rowIndex][COL_STATUS];
+    
+    Logger.log(`FORCE MODE: Processing ONLY row 4: Start Date = ${dateCell}, Status = ${statusCell} (STATUS WILL BE IGNORED)`);
+    
+    const today = new Date();
+    
+    // In forced mode, ignore status check and process regardless
+    if (dateCell instanceof Date) {
+      const daysDiff = (dateCell - today) / (1000 * 60 * 60 * 24);
+      Logger.log(`Row 4: Days difference = ${daysDiff}`);
+      
+      if (daysDiff <= 15 && daysDiff > 0) {
+        // Extract data from row 4
+        const newHireName = data[rowIndex][COL_NEW_HIRE_NAME];
+        const title = data[rowIndex][COL_TITLE];
+        const division = data[rowIndex][COL_DIVISION];
+        const department = data[rowIndex][COL_DEPARTMENT];
+        const employmentType = data[rowIndex][COL_EMPLOYMENT_TYPE];
+        const startDate = data[rowIndex][COL_START_DATE];
+        const orientation = data[rowIndex][COL_ORIENTATION];
+        const employmentLocation = data[rowIndex][COL_EMPLOYMENT_LOCATION];
+        const deskAssignment = data[rowIndex][COL_DESK_ASSIGNMENT];
+        const personalEmail = data[rowIndex][COL_PERSONAL_EMAIL];
+        const address = data[rowIndex][COL_ADDRESS];
+        const laptopType = data[rowIndex][COL_LAPTOP_TYPE];
+        
+        // Create ticket for row 4
+        const summary = `New Hire Notification: ${newHireName} - ${startDate.toDateString()}`;
+        const description = [
+          createSectionHeader("Basic Information"),
+          createParagraphWithBold('New Hire Name', newHireName),
+          createParagraphWithBold('Start Date', startDate.toDateString()),
+          createParagraphWithBold('Laptop Type', laptopType),
+          
+          createSectionHeader("Position Details"),
+          createParagraphWithBold('Title', title),
+          createParagraphWithBold('Division', division),
+          createParagraphWithBold('Department', department),
+          createParagraphWithBold('Employment Type', employmentType),
+
+          createSectionHeader("Work Details"),
+          createParagraphWithBold('Orientation', orientation),
+          createParagraphWithBold('Employment Location', employmentLocation),
+          createParagraphWithBold('Desk Assignment', deskAssignment),
+
+          createSectionHeader("Contact Information"),
+          createParagraphWithBold('Personal Email', personalEmail),
+          createParagraphWithBold('Address', address)
+        ];
+        
+        const response = createJiraIssue(JIRA_URL, PROJECT_KEY, API_TOKEN, EMAIL, summary, description);
+        
+        if (response) {
+          Logger.log(`FORCE MODE: Ticket created successfully for row 4`);
+          sheet.getRange(rowIndex + 1, COL_STATUS + 1).setValue('Ticket Created');
+        } else {
+          Logger.log(`FORCE MODE: Failed to create ticket for row 4`);
+        }
+      } else {
+        Logger.log(`Row 4 does not meet the date criteria (15 days away).`);
+      }
+    } else {
+      Logger.log(`Row 4 skipped: Start Date is not a valid date.`);
+    }
+  } catch (error) {
+    Logger.log(`Error in script execution: ${error.toString()}`);
+    sendErrorEmail(error);
+  }
+  
+  Logger.log('===== FORCED MANUAL RUN COMPLETED - ONLY ROW 4 WAS PROCESSED =====');
+}
+
+function createJiraIssue(jiraUrl, projectKey, apiToken, email, summary, description) {
+  const url = `${jiraUrl}/rest/api/3/issue`;
+
+  const payload = {
+    fields: {
+      project: {
+        key: projectKey
+      },
+      summary: summary, // Dynamic summary
+      description: {
+        "type": "doc",
+        "version": 1,
+        "content": description
+      },
+      issuetype: {
+        name: 'New Hire Onboarding' // Changed from 'Task' to 'New Hire Onboarding'
+      }
+    }
+  };
+
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      Authorization: 'Basic ' + Utilities.base64Encode(email + ':' + apiToken)
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true // Allows you to see the full error response
+  };
+
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    Logger.log(`Full Response: ${response.getContentText()}`); // Log the full response to see details
+    const responseData = JSON.parse(response.getContentText());
+    
+    if (responseData.errors) {
+      Logger.log(`Jira API Error: ${JSON.stringify(responseData.errors)}`);
+      return false;
+    }
+    
+    Logger.log(`Issue created: ${responseData.key}`); // Log the issue key if successfully created
+    return true;
+  } catch (e) {
+    Logger.log(`Error creating Jira issue: ${e}`);
+    return false;
+  }
+}
+
+function createParagraphWithBold(label, value) {
+  return {
+    "type": "paragraph",
+    "content": [
+      {
+        "type": "text",
+        "text": `${label}: `,
+        "marks": [
+          {
+            "type": "strong"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "text": value || "N/A" // Handle null/undefined values
+      }
+    ]
+  };
+}
+
+function createSectionHeader(text) {
+  return {
+    "type": "heading",
+    "attrs": {
+      "level": 2
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": text
+      }
+    ]
+  };
+}
+
+// Send an error email to administrators if something goes wrong
+function sendErrorEmail(error) {
+  const adminEmail = "your-admin-email@company.com"; // Replace with your admin email
+  const subject = "Error in JIRA Ticket Creation Script";
+  const body = `An error occurred in the JIRA ticket creation script:\n\n${error.toString()}\n\nPlease check the script and logs.`;
+  
+  try {
+    MailApp.sendEmail(adminEmail, subject, body);
+    Logger.log("Error notification email sent.");
+  } catch (e) {
+    Logger.log(`Error sending notification email: ${e}`);
+  }
+}
+
+// Setup time-based trigger (daily)
+function setupDailyTrigger() {
+  // Clear existing triggers
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'createJiraTickets') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  }
+  
+  // Create a new daily trigger
+  ScriptApp.newTrigger('createJiraTickets')
+      .timeBased()
+      .everyDays(1)
+      .atHour(6) // Run at 6 AM
+      .create();
+      
+  Logger.log("Daily trigger set up successfully.");
+}
