@@ -1,0 +1,217 @@
+/***********************
+* CONFIG - EDIT THESE *
+***********************/
+const CONFIG = {
+ // Column letters in each sheet (tab)
+ COLS: {
+   APP_PACKAGE: 'A', // write the Drive link (as =HYPERLINK)
+   ID:          'B', // user ID in the sheet
+   FULL_NAME:   'C', // (not required, we match by ID)
+ },
+
+
+ // Header row number
+ HEADER_ROW: 1,
+
+
+ // Whether to write only into empty cells in Column A (true), or overwrite existing cell data (false)
+ ONLY_IF_EMPTY: true,
+
+
+ // Write hyperlinks as a formula
+ USE_HYPERLINK_FORMULA: true,
+ HYPERLINK_TEXT: 'Open Resume',
+
+
+ // Recursively scan subfolders
+ RECURSE: true,
+
+
+ // Map each sheet (tab) to its Drive folder ID
+ SHEET_TO_FOLDER: {
+   V1: 'PASTE_FOLDER_ID_FOR_V1',
+   V2: 'PASTE_FOLDER_ID_FOR_V2',
+   V3: 'PASTE_FOLDER_ID_FOR_V3',
+   V4: 'PASTE_FOLDER_ID_FOR_V4'
+
+ }
+};
+
+
+/**
+* Filename pattern:
+*   First-Last-<UniqueID>-<CommonRef>-anything.pdf
+* We extract the FIRST numeric block in the pattern -<digits>-<digits>-,
+* treating the first <digits> as the Unique ID and ignoring the second.
+*
+* Examples matched:
+*   Aahaan-Maini-21149911-433018-Research Intern.pdf  -> 21149911
+*/
+const UNIQUE_ID_FROM_NAME = /-(\d{5,})-\d{3,}-/; // capture group 1 is the Unique ID
+
+
+/***********************
+* MENU
+***********************/
+function onOpen() {
+ SpreadsheetApp.getUi()
+   .createMenu('User Linker')
+   .addItem('Link V1 (from its folder)', 'Link_V1')
+   .addItem('Link V2 (from its folder)', 'Link_V2')
+   .addItem('Link V3 (from its folder)', 'Link_V3')
+   .addItem('Link V4 (from its folder)', 'Link_V4')
+   .addToUi();
+}
+
+
+/***********************
+* ENTRY POINTS (per sheet)
+***********************/
+function Link_V1() { LinkOne_('V1'); }
+function Link_V2() { LinkOne_('V2'); }
+function Link_V3() { LinkOne_('V3'); }
+function Link_V4() { LinkOne_('V3'); }
+
+
+/***********************
+* MAIN (single sheet run)
+***********************/
+function LinkOne_(sheetName) {
+ const ss = SpreadsheetApp.getActiveSpreadsheet();
+ const sh = ss.getSheetByName(sheetName);
+ if (!sh) throw new Error(`Sheet "${sheetName}" not found.`);
+
+
+ const folderId = CONFIG.SHEET_TO_FOLDER[sheetName];
+ if (!folderId) throw new Error(`No folder ID set for sheet "${sheetName}" in CONFIG.SHEET_TO_FOLDER.`);
+
+
+ // Build an index of files for JUST this sheet's folder
+ const filesIndex = buildFilesIndexFromFolder_(folderId, CONFIG.RECURSE);
+
+
+ const updates = linkSheetWithIndex_(sh, filesIndex);
+ ss.toast(`"${sheetName}": updated ${updates} row(s).`, 'User Linker', 8);
+}
+
+
+/***********************
+* PER-SHEET LINKING
+***********************/
+function linkSheetWithIndex_(sh, filesIndex) {
+ const lastRow = sh.getLastRow();
+ const lastCol = sh.getLastColumn();
+ if (lastRow <= CONFIG.HEADER_ROW) return 0;
+
+
+ const appCol = colLetterToIndex_(CONFIG.COLS.APP_PACKAGE);
+ const idCol  = colLetterToIndex_(CONFIG.COLS.ID);
+
+
+ const range = sh.getRange(CONFIG.HEADER_ROW + 1, 1, lastRow - CONFIG.HEADER_ROW, lastCol);
+ const values = range.getValues();
+
+
+ let updates = 0;
+
+
+ for (let r = 0; r < values.length; r++) {
+   const row = values[r];
+   const existing = row[appCol - 1];
+   if (CONFIG.ONLY_IF_EMPTY && existing) continue;
+
+
+   const id = String(row[idCol - 1] ?? '').trim();
+   if (!id) continue;
+
+
+   const hit = filesIndex.byId.get(id);
+   if (!hit) continue;
+
+
+   const url = hit.url;
+   const toWrite = CONFIG.USE_HYPERLINK_FORMULA
+     ? `=HYPERLINK("${url}", "${CONFIG.HYPERLINK_TEXT}")`
+     : url;
+
+
+   if (row[appCol - 1] !== toWrite) {
+     row[appCol - 1] = toWrite;
+     updates++;
+   }
+ }
+
+
+ if (updates > 0) range.setValues(values);
+ return updates;
+}
+
+
+/***********************
+* DRIVE SCAN & INDEX (per-folder)
+***********************/
+function buildFilesIndexFromFolder_(folderId, recurse) {
+ const files = [];
+ pushFilesFromFolder_(folderId, files, !!recurse);
+
+
+ // Build ID -> newest file map
+ const byId = new Map();
+ for (const f of files) {
+   const id = extractUniqueIdFromName_(f.name);
+   if (!id) continue;
+
+
+   const prev = byId.get(id);
+   if (!prev || (f.updated || 0) >= (prev.updated || 0)) {
+     byId.set(id, f);
+   }
+ }
+ return { files, byId };
+}
+
+
+function pushFilesFromFolder_(folderId, out, recurse) {
+ const folder = DriveApp.getFolderById(folderId);
+
+
+ const files = folder.getFiles();
+ while (files.hasNext()) {
+   const file = files.next();
+   out.push({
+     id: file.getId(),
+     name: file.getName() || '',
+     url: file.getUrl() || '',
+     mimeType: file.getMimeType() || '',
+     updated: file.getLastUpdated() ? file.getLastUpdated().getTime() : 0
+   });
+ }
+
+
+ if (recurse) {
+   const subs = folder.getFolders();
+   while (subs.hasNext()) {
+     const sub = subs.next();
+     pushFilesFromFolder_(sub.getId(), out, true);
+   }
+ }
+}
+
+
+/***********************
+* HELPERS
+***********************/
+function extractUniqueIdFromName_(filename) {
+ // Pull the first numeric block in a "-<digits>-<digits>-" segment
+ // e.g., "-21149911-433018-" -> "21149911"
+ const m = filename.match(UNIQUE_ID_FROM_NAME);
+ return m ? m[1] : '';
+}
+
+
+function colLetterToIndex_(letter) {
+ let idx = 0;
+ const up = letter.toUpperCase().trim();
+ for (let i = 0; i < up.length; i++) idx = idx * 26 + (up.charCodeAt(i) - 64);
+ return idx;
+}
