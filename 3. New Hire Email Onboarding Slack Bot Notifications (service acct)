@@ -1,0 +1,370 @@
+/**
+ * Slack New Hire Notification Script
+ * Written by: Christpher Ejbich
+ * Version: 1.0
+ * 
+ * This script reads employee data from a spreadsheet and posts notifications
+ * to a private Slack channel for employees with a start date within 14 days
+ * and a "Processed" status.
+ * 
+ * Required columns in spreadsheet:
+ * - Column A: New Hire Name
+ * - Column B: Title
+ * - Column G: Start Date
+ * - Column AC: Status
+ * - Column AD: Created Email
+ * 
+ * The script uses Script Properties to keep track of which employees have already
+ * been notified to prevent duplicate notifications.
+ */
+
+// Configuration constants
+const SPREADSHEET_ID = "[spreadsheet id from google sheet]"; 
+const SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/[slack webhook url]";
+const SLACK_CHANNEL = "#[slack channel bot is to run in]";
+
+/**
+ * Main function to run the script. Can be set to run daily via triggers.
+ */
+function notifyNewHiresOnSlack() {
+  try {
+    Logger.log("=== Starting New Hire Slack Notification Process ===");
+    
+    // Run cleanup of old notification records
+    cleanupOldNotifications();
+    
+    // Get the spreadsheet by ID and the first sheet
+    Logger.log(`Accessing spreadsheet with ID: ${SPREADSHEET_ID}`);
+    const spreadsheet = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheet = spreadsheet.getSheets()[0]; // Gets the first sheet
+    Logger.log(`Using sheet: ${sheet.getName()}`);
+    
+    // Get all data from the sheet
+    const data = sheet.getDataRange().getValues();
+    Logger.log(`Retrieved ${data.length} rows of data (including header)`);
+    
+    // Skip the header row by starting at index 1
+    if (data.length <= 1) {
+      Logger.log("No data found in spreadsheet besides header. Exiting.");
+      return;
+    }
+    
+    // Log the column headers to verify the structure
+    Logger.log(`Column headers: ${data[0].join(", ")}`);
+    
+    // Calculate the target date (14 days from now)
+    const targetDate = new Date();
+    targetDate.setDate(targetDate.getDate() + 14);
+    
+    // Format the target date for logging
+    const targetDateFormatted = Utilities.formatDate(targetDate, Session.getScriptTimeZone(), "MM/dd/yyyy");
+    const currentDateFormatted = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "MM/dd/yyyy");
+    Logger.log("Looking for employees starting between: " + currentDateFormatted + " and " + targetDateFormatted);
+    
+    // Group employees by start date
+    const employeesByStartDate = groupEmployeesByStartDate(data);
+    
+    // Post notifications to Slack for each start date
+    Logger.log("=== Processing Groups by Start Date ===");
+    const startDates = Object.keys(employeesByStartDate);
+    Logger.log(`Found ${startDates.length} start date(s) with eligible employees`);
+    
+    for (const startDate in employeesByStartDate) {
+      const employees = employeesByStartDate[startDate];
+      Logger.log(`Start date ${startDate}: ${employees.length} employee(s)`);
+      
+      if (employees.length > 0) {
+        Logger.log(`Preparing Slack notification for ${employees.length} employee(s) starting on ${startDate}`);
+        postToSlack(startDate, employees);
+      }
+    }
+    
+    Logger.log("=== Script execution completed successfully. ===");
+  } catch (error) {
+    Logger.log("Error: " + error.toString());
+  }
+}
+
+/**
+ * Groups employees by their start date if they meet the criteria.
+ * 
+ * @param {Array} data - The spreadsheet data.
+ * @return {Object} - Object with start dates as keys and arrays of employee data as values.
+ */
+function groupEmployeesByStartDate(data) {
+  const employeesByStartDate = {};
+  Logger.log("=== Processing Employee Data ===");
+  
+  // Skip the header row
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    
+    // Extract data from relevant columns
+    const name = row[0];          // Column A - New Hire Name
+    const title = row[1];         // Column B - Title
+    const startDateValue = row[6]; // Column G - Start Date
+    const status = row[28];       // Column AC - Status
+    const email = row[29];        // Column AD - Created Email
+    
+    Logger.log(`Row ${i}: Name=${name}, Title=${title}, StartDate=${startDateValue}, Status=${status}, Email=${email}`);
+    
+    // Skip if any required field is empty
+    if (!name || !title || !startDateValue || !status || !email) {
+      Logger.log(`  - Skipping row ${i}: Missing required field(s)`);
+      continue;
+    }
+    
+    // Skip if status is not "Processed"
+    if (status !== "Processed") {
+      Logger.log(`  - Skipping row ${i}: Status is not "Processed" (current: ${status})`);
+      continue;
+    }
+    
+    // Check if this employee has already been notified
+    if (wasEmployeeNotified(email)) {
+      Logger.log(`  - Skipping row ${i}: Already sent notification for ${email}`);
+      continue;
+    }
+    
+    // Convert start date to a proper Date object if it's not already
+    let startDate;
+    if (startDateValue instanceof Date) {
+      startDate = startDateValue;
+    } else {
+      // Try to parse the date (handles various formats)
+      startDate = new Date(startDateValue);
+      if (isNaN(startDate.getTime())) {
+        Logger.log(`Invalid date format for employee ${name}: ${startDateValue}`);
+        continue;
+      }
+    }
+    
+    // Calculate the target date (14 days from now)
+    const targetDate = new Date();
+    targetDate.setDate(targetDate.getDate() + 14);
+    
+    // Check if the start date is within the next 14 days
+    const currentDate = new Date();
+    currentDate.setHours(0, 0, 0, 0); // Set to beginning of day
+    
+    // Set target date to beginning of day for comparison
+    targetDate.setHours(0, 0, 0, 0);
+    
+    // Set start date to beginning of day for comparison
+    const startDateTime = new Date(startDate);
+    startDateTime.setHours(0, 0, 0, 0);
+    
+    // Check if start date is between today and 14 days from now
+    if (startDateTime >= currentDate && startDateTime <= targetDate) {
+      // Format the start date for the notification
+      const formattedStartDate = Utilities.formatDate(startDate, Session.getScriptTimeZone(), "M/d/yy");
+      Logger.log(`  - MATCH: Employee ${name} starts on ${formattedStartDate} (within 14-day window)`);
+      
+      // Initialize the array for this start date if it doesn't exist
+      if (!employeesByStartDate[formattedStartDate]) {
+        employeesByStartDate[formattedStartDate] = [];
+      }
+      
+      // Add employee data to the array for this start date
+      employeesByStartDate[formattedStartDate].push({
+        name: name,
+        title: title,
+        email: email
+      });
+    } else {
+      const daysUntilStart = Math.floor((startDateTime - currentDate) / (1000 * 60 * 60 * 24));
+      Logger.log(`  - NOT IN RANGE: Employee ${name} starts in ${daysUntilStart} days (outside 14-day window)`);
+    }
+  }
+  
+  return employeesByStartDate;
+}
+
+/**
+ * Posts a notification to Slack for employees starting on a specific date.
+ * 
+ * @param {string} startDate - The formatted start date.
+ * @param {Array} employees - Array of employee data objects.
+ */
+function postToSlack(startDate, employees) {
+  Logger.log("=== Preparing Slack Message ===");
+  
+  // Create a text-only message for better control of line breaks
+  let message = `*New Hire${employees.length > 1 ? 's' : ''} for ${startDate}:*\n\n`;
+  
+  // Add each employee on a separate line
+  employees.forEach(employee => {
+    const employeeLine = `${employee.name} - ${employee.title} - ${employee.email}`;
+    message += `${employeeLine}\n`;
+    Logger.log(`Adding to message: ${employeeLine}`);
+  });
+  
+  Logger.log("=== Complete Message Content ===");
+  Logger.log(message);
+  
+  // Build the Slack payload with text only, no blocks
+  const payload = {
+    "channel": SLACK_CHANNEL,
+    "text": message,
+    "link_names": 0,  // Prevents auto-linking of @mentions and channels
+    "unfurl_links": false,  // Prevents link unfurling
+    "unfurl_media": false   // Prevents media unfurling
+  };
+  
+  // Post to Slack via webhook
+  const options = {
+    "method": "post",
+    "contentType": "application/json",
+    "payload": JSON.stringify(payload)
+  };
+  
+  Logger.log(`Sending to Slack channel: ${SLACK_CHANNEL}`);
+  
+  try {
+    const response = UrlFetchApp.fetch(SLACK_WEBHOOK_URL, options);
+    const responseCode = response.getResponseCode();
+    const responseText = response.getContentText();
+    
+    Logger.log(`Slack API Response: Status ${responseCode}`);
+    Logger.log(`Response body: ${responseText}`);
+    Logger.log(`Successfully posted notification to Slack for ${startDate}`);
+    
+    // Mark all employees in this notification as notified
+    employees.forEach(employee => {
+      markEmployeeAsNotified(employee.email, startDate);
+    });
+  } catch (error) {
+    Logger.log(`ERROR posting to Slack: ${error.toString()}`);
+    Logger.log(`Error details: ${error.stack || "No stack trace available"}`);
+  }
+}
+
+/**
+ * Gets previously notified employees from Script Properties storage.
+ * 
+ * @return {Object} Map of employee emails to notification timestamps
+ */
+function getNotifiedEmployees() {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const notifiedJson = scriptProperties.getProperty('notifiedEmployees') || '{}';
+  
+  try {
+    return JSON.parse(notifiedJson);
+  } catch (e) {
+    Logger.log('Error parsing notified employees, resetting: ' + e);
+    return {};
+  }
+}
+
+/**
+ * Saves the updated list of notified employees to Script Properties.
+ * 
+ * @param {Object} notifiedEmployees Map of employee emails to notification timestamps
+ */
+function saveNotifiedEmployees(notifiedEmployees) {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  scriptProperties.setProperty('notifiedEmployees', JSON.stringify(notifiedEmployees));
+}
+
+/**
+ * Records that an employee has been notified.
+ * 
+ * @param {string} email The employee's email address
+ * @param {string} startDate The employee's start date
+ */
+function markEmployeeAsNotified(email, startDate) {
+  const notifiedEmployees = getNotifiedEmployees();
+  notifiedEmployees[email] = {
+    timestamp: new Date().getTime(),
+    startDate: startDate
+  };
+  saveNotifiedEmployees(notifiedEmployees);
+  Logger.log(`Marked employee ${email} as notified for start date ${startDate}`);
+}
+
+/**
+ * Checks if an employee has already been notified.
+ * 
+ * @param {string} email The employee's email address
+ * @return {boolean} True if the employee has already been notified
+ */
+function wasEmployeeNotified(email) {
+  const notifiedEmployees = getNotifiedEmployees();
+  return !!notifiedEmployees[email];
+}
+
+/**
+ * Cleanup old notification records (older than 30 days).
+ * This prevents the storage from growing too large over time.
+ */
+function cleanupOldNotifications() {
+  const notifiedEmployees = getNotifiedEmployees();
+  const now = new Date().getTime();
+  const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+  let cleaned = 0;
+  
+  for (const email in notifiedEmployees) {
+    if (now - notifiedEmployees[email].timestamp > thirtyDaysMs) {
+      delete notifiedEmployees[email];
+      cleaned++;
+    }
+  }
+  
+  if (cleaned > 0) {
+    saveNotifiedEmployees(notifiedEmployees);
+    Logger.log(`Cleaned up ${cleaned} old notification records`);
+  }
+}
+
+/**
+ * Creates a time-based trigger to run the script daily.
+ * Run this function once to set up the trigger.
+ */
+function createDailyTrigger() {
+  // Delete any existing triggers
+  const triggers = ScriptApp.getProjectTriggers();
+  for (let i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === "notifyNewHiresOnSlack") {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  
+  // Create a new trigger to run daily
+  ScriptApp.newTrigger("notifyNewHiresOnSlack")
+    .timeBased()
+    .everyDays(1)
+    .atHour(9)
+    .nearMinute(30) // Run at 9:30am ET
+    .create();
+    
+  Logger.log("Daily trigger created to run at 9:30am ET.");
+}
+
+/**
+ * Lists all employees that have already been notified.
+ * Useful for debugging and verification.
+ */
+function listNotifiedEmployees() {
+  const notifiedEmployees = getNotifiedEmployees();
+  Logger.log("=== Previously Notified Employees ===");
+  
+  for (const email in notifiedEmployees) {
+    const notificationTime = new Date(notifiedEmployees[email].timestamp);
+    const formattedTime = Utilities.formatDate(notificationTime, Session.getScriptTimeZone(), "MM/dd/yyyy HH:mm:ss");
+    Logger.log(`${email} - Start Date: ${notifiedEmployees[email].startDate} - Notified: ${formattedTime}`);
+  }
+  
+  if (Object.keys(notifiedEmployees).length === 0) {
+    Logger.log("No employees have been notified yet.");
+  }
+}
+
+/**
+ * Resets the notification history (for testing purposes only).
+ * USE WITH CAUTION - this will cause all employees to be notified again.
+ */
+function resetNotificationHistory() {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  scriptProperties.deleteProperty('notifiedEmployees');
+  Logger.log("Notification history has been reset. All employees will be eligible for notification again.");
+}
