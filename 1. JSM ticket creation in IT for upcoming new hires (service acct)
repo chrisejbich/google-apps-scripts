@@ -1,3 +1,9 @@
+/**
+ * JSM ticket creation in IT for upcoming new hires (service acct)
+ * Version: 1.1
+ * Written by: Christopher Ejbich
+ */
+
 // Configuration constants
 const SPREADSHEET_ID = '[spreadsheet id from google sheet]'; // Replace with your spreadsheet ID
 const SHEET_NAME = '[name of spreadsheet you are pulling the data from]';
