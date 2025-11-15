@@ -1,0 +1,694 @@
+/**
+ * Google Apps Script for automating user creation via Admin SDK
+ * Version: 1.2
+ * Written by: Christopher Ejbich
+ * Updated to properly assign OUs based on division
+ */
+
+// Configuration  
+const SPREADSHEET_ID = '[spreadsheet id from google sheet]';
+const SHEET_NAME = '[name of spreadsheet you are pulling the data from]';
+const DOMAIN = '[your company domain; ex: company.com]';
+
+// Column references (A=0, B=1, etc.)
+const COL_NEW_HIRE_NAME = 0;  // Column A - New Hire Name
+const COL_TITLE = 1;          // Column B - Title
+const COL_DIVISION = 2;       // Column C - Division
+const COL_DEPARTMENT = 3;     // Column D - Department
+const COL_MANAGER = 4;        // Column E - Manager
+const COL_EMPLOYMENT_TYPE = 5; // Column F - Employment Type
+const COL_START_DATE = 6;     // Column G - Start Date
+const COL_LOCATION = 9;       // Column J - Employment Location
+const COL_PERSONAL_EMAIL = 16; // Column Q - Personal Email
+const COL_STATUS = 28;        // Column AC - Status
+const COL_CREATED_EMAIL = 29; // Column AD - Created Email
+
+// OU IDs from your Google Workspace
+const OU_IDS = {
+  "Engineering": "id:[alphanumerical id of your OU]",
+  "Standard": "id:[alphanumerical id of your OU]",
+  "Standard + AWS and GitHub": "id:[alphanumerical id of your OU]",
+  "External Contractors": "id:[alphanumerical id of your OU]",
+};
+
+/**
+ * Function to create a test user from row 4
+ */
+function manualRun() {
+  Logger.log("Starting manual run...");
+  
+  try {
+    // Get the sheet
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheet = ss.getSheetByName(SHEET_NAME);
+    if (!sheet) {
+      Logger.log("Sheet not found");
+      return;
+    }
+    
+    // Get row 4 data
+    const row4 = sheet.getRange(4, 1, 1, 30).getValues()[0];
+    
+    // Log each column value for debugging
+    Logger.log("Row 4 values:");
+    Logger.log(`A (0) - New Hire Name: "${row4[COL_NEW_HIRE_NAME]}"`);
+    Logger.log(`B (1) - Title: "${row4[COL_TITLE]}"`);
+    Logger.log(`C (2) - Division: "${row4[COL_DIVISION]}"`);
+    Logger.log(`D (3) - Department: "${row4[COL_DEPARTMENT]}"`);
+    Logger.log(`E (4) - Manager: "${row4[COL_MANAGER]}"`);
+    Logger.log(`F (5) - Employment Type: "${row4[COL_EMPLOYMENT_TYPE]}"`);
+    Logger.log(`G (6) - Start Date: "${row4[COL_START_DATE]}"`);
+    Logger.log(`J (9) - Location: "${row4[COL_LOCATION]}"`);
+    Logger.log(`Q (16) - Personal Email: "${row4[COL_PERSONAL_EMAIL]}"`);
+    
+    // Basic details
+    const fullName = row4[COL_NEW_HIRE_NAME];
+    Logger.log(`Processing: ${fullName}`);
+    
+    // Parse name
+    const nameInfo = parseFullName(fullName);
+    
+    // Generate email
+    const userEmail = generateEmail(nameInfo.firstName, nameInfo.lastName);
+    
+    // Get manager email
+    const managerEmail = getManagerEmail(row4[COL_MANAGER]);
+    
+    // Log the employment type
+    const employmentType = row4[COL_EMPLOYMENT_TYPE];
+    Logger.log(`Employment Type: "${employmentType}"`);
+    
+    // Determine OU based on division
+    const ouId = determineOUID(row4[COL_DIVISION]);
+    Logger.log(`Determined OU ID: ${ouId} for division: ${row4[COL_DIVISION]}`);
+    
+    // Create user with minimal data, keeping original employment type
+    const userData = {
+      primaryEmail: userEmail,
+      name: {
+        givenName: nameInfo.firstName,
+        familyName: nameInfo.lastName,
+        fullName: `${nameInfo.firstName} ${nameInfo.lastName}`
+      },
+      password: generatePassword(12),
+      changePasswordAtNextLogin: true,
+      orgUnitPath: ouIdToPath(ouId), // Convert OU ID to path for user creation
+      employeeType: employmentType
+    };
+    
+    // Add personal email as secondary email instead of recovery email
+    if (row4[COL_PERSONAL_EMAIL]) {
+      userData.emails = [{
+        address: row4[COL_PERSONAL_EMAIL],
+        type: 'home',
+        primary: false
+      }];
+    }
+    
+    // Add job details without the "type" property
+    userData.organizations = [{
+      title: row4[COL_TITLE] || '',
+      department: row4[COL_DEPARTMENT] || '',
+      description: row4[COL_EMPLOYMENT_TYPE] || '',
+      primary: true
+    }];
+    
+    // Log the user data for verification
+    Logger.log("User data being sent to API:");
+    Logger.log(JSON.stringify(userData, null, 2));
+    
+    Logger.log(`Creating user: ${userEmail}`);
+    const user = AdminDirectory.Users.insert(userData);
+    
+    Logger.log(`User created successfully: ${userEmail}`);
+    
+    // Update spreadsheet
+    sheet.getRange(4, COL_STATUS + 1).setValue('Processed');
+    sheet.getRange(4, COL_CREATED_EMAIL + 1).setValue(userEmail);
+    
+    // Add to groups based on division and location
+    addToGroups(userEmail, row4[COL_DIVISION], row4[COL_LOCATION], row4[COL_TITLE]);
+    
+    // Set manager
+    if (managerEmail) {
+      Utilities.sleep(2000);
+      setManager(userEmail, managerEmail);
+    }
+    
+  } catch (error) {
+    Logger.log(`Error: ${error.message}`);
+    Logger.log(`Stack trace: ${error.stack}`);
+  }
+}
+
+/**
+ * Main function to process all new hires
+ */
+function createNewUserAccounts() {
+  try {
+    // Get the sheet
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const sheet = ss.getSheetByName(SHEET_NAME);
+    if (!sheet) {
+      Logger.log("Sheet not found");
+      return;
+    }
+    
+    // Check if status column exists, add it if it doesn't
+    let lastColumn = sheet.getLastColumn();
+    if (lastColumn < COL_STATUS + 1) {
+      sheet.getRange(1, COL_STATUS + 1).setValue("Account Creation Status");
+      
+      // Fill status as "Pending" for all existing entries, starting from row 4
+      const dataRowCount = sheet.getLastRow() - 3; 
+      if (dataRowCount > 0) {
+        sheet.getRange(4, COL_STATUS + 1, dataRowCount, 1).setValue("Pending");
+      }
+    }
+    
+    // Get all data
+    const dataRange = sheet.getDataRange();
+    const values = dataRange.getValues();
+    
+    // Process rows starting from row 4 (index 3)
+    for (let i = 3; i < values.length; i++) {
+      const row = values[i];
+      const status = row[COL_STATUS];
+      
+      // Check start date - only process if within 15 days
+      const startDate = row[COL_START_DATE];
+      const isWithin15Days = isStartDateWithin15Days(startDate);
+      
+      // Only process rows with "Pending" status or empty status AND start date within 15 days
+      if ((!status || status === 'Pending') && isWithin15Days) {
+        try {
+          // Log column values for debugging
+          Logger.log(`Processing row ${i + 1}:`);
+          Logger.log(`- Name: "${row[COL_NEW_HIRE_NAME]}"`);
+          Logger.log(`- Division: "${row[COL_DIVISION]}"`);
+          Logger.log(`- Employment Type: "${row[COL_EMPLOYMENT_TYPE]}"`);
+          
+          // Parse name field
+          const nameInfo = parseFullName(row[COL_NEW_HIRE_NAME]);
+          
+          // Get email and manager
+          const userEmail = generateEmail(nameInfo.firstName, nameInfo.lastName);
+          const managerEmail = getManagerEmail(row[COL_MANAGER]);
+          
+          // Determine OU based on division
+          const ouId = determineOUID(row[COL_DIVISION]);
+          Logger.log(`Determined OU ID: ${ouId} for division: ${row[COL_DIVISION]}`);
+          
+          // Create user with minimal data, keeping original employment type
+          const userData = {
+            primaryEmail: userEmail,
+            name: {
+              givenName: nameInfo.firstName,
+              familyName: nameInfo.lastName,
+              fullName: `${nameInfo.firstName} ${nameInfo.lastName}`
+            },
+            password: generatePassword(12),
+            changePasswordAtNextLogin: true,
+            orgUnitPath: ouIdToPath(ouId), // Convert OU ID to path for user creation
+            employeeType: row[COL_EMPLOYMENT_TYPE]
+          };
+          
+          // Add personal email as secondary email instead of recovery email
+          if (row[COL_PERSONAL_EMAIL]) {
+            userData.emails = [{
+              address: row[COL_PERSONAL_EMAIL],
+              type: 'home',
+              primary: false
+            }];
+          }
+          
+          // Add job details without the "type" property
+          userData.organizations = [{
+            title: row[COL_TITLE] || '',
+            department: row[COL_DEPARTMENT] || '',
+            description: row[COL_EMPLOYMENT_TYPE] || '',
+            primary: true
+          }];
+          
+          Logger.log(`Creating user: ${userEmail}`);
+          const user = AdminDirectory.Users.insert(userData);
+          
+          // Update status
+          sheet.getRange(i + 1, COL_STATUS + 1).setValue('Processed');
+          
+          // Set created email in column AD
+          if (lastColumn < COL_CREATED_EMAIL + 1) {
+            sheet.getRange(1, COL_CREATED_EMAIL + 1).setValue("Created Email");
+          }
+          sheet.getRange(i + 1, COL_CREATED_EMAIL + 1).setValue(userEmail);
+          
+          // Add to groups
+          addToGroups(userEmail, row[COL_DIVISION], row[COL_LOCATION], row[COL_TITLE]);
+          
+          // Set manager
+          if (managerEmail) {
+            Utilities.sleep(2000);
+            setManager(userEmail, managerEmail);
+          }
+          
+          Logger.log(`Successfully created account for ${userEmail}`);
+          
+        } catch (error) {
+          // Update status to "Error" and log
+          sheet.getRange(i + 1, COL_STATUS + 1).setValue(`Error: ${error.message}`);
+          Logger.log(`Error creating account for ${row[COL_NEW_HIRE_NAME]}: ${error.message}`);
+        }
+      }
+    }
+    
+    Logger.log("Processing complete!");
+  } catch (error) {
+    Logger.log(`Error in createNewUserAccounts: ${error.message}`);
+  }
+}
+
+/**
+ * Determine OU ID based on division
+ */
+function determineOUID(division) {
+  // Clean the division input
+  const divisionClean = division ? division.trim() : '';
+  
+  // Map divisions to appropriate OUs
+  if (divisionClean === 'A&A' || 
+      divisionClean === 'Product' || 
+      divisionClean === 'Onboard Software' || 
+      divisionClean === 'Software') {
+    return OU_IDS.Engineering;
+  }
+  // Hardware division handling 
+  else if (divisionClean === 'Hardware / Operations / Systems & Safety') {
+    return OU_IDS.Engineering;
+  }
+  // Operations division goes to Standard + AWS and GitHub
+  else if (divisionClean === 'Operations') {
+    return OU_IDS["Standard + AWS and GitHub"];
+  }
+  // Standard OU assignments (for all other divisions)
+  else if (divisionClean === 'Commercial' || 
+           divisionClean === 'Places' || 
+           divisionClean === 'Finance' || 
+           divisionClean === 'People' || 
+           divisionClean === 'Legal') {
+    return OU_IDS.Standard;
+  }
+  // Default to Standard for any unmatched divisions
+  else {
+    Logger.log(`Division not explicitly matched: "${divisionClean}". Using Standard OU as default.`);
+    return OU_IDS.Standard;
+  }
+}
+
+/**
+ * Convert OU ID to OU Path for user creation
+ * This is a new function to handle API requirements
+ */
+function ouIdToPath(ouId) {
+  // Map of known OU IDs to their paths
+  const ouPaths = {
+    [OU_IDS.Engineering]: "/Employees/Engineering",
+    [OU_IDS.Standard]: "/Employees/Standard",
+    [OU_IDS["Standard + AWS and GitHub"]]: "/Employees/Standard + AWS and GitHub",
+    [OU_IDS["External Contractors"]]: "/External Contractors"
+  };
+  
+  // Return the path if we know it, otherwise return root path "/"
+  return ouPaths[ouId] || "/";
+}
+
+/**
+ * Parse full name and extract first name, last name, and preferred name
+ */
+function parseFullName(fullName) {
+  // Handle null or empty values
+  if (!fullName) {
+    throw new Error("Name is missing");
+  }
+  
+  // Check if there's a preferred name in brackets
+  const preferredNameRegex = /(.+?)\s*\((.+?)\)\s*(.+)/;
+  const match = fullName.match(preferredNameRegex);
+  
+  if (match) {
+    // If preferred name found in brackets
+    const legalFirstName = match[1].trim();
+    const preferredFirstName = match[2].trim();
+    const lastName = match[3].trim();
+    
+    return {
+      legalFirstName: legalFirstName,
+      firstName: preferredFirstName, // Use preferred name as primary
+      lastName: lastName
+    };
+  } else {
+    // No preferred name, split on the last space
+    const parts = fullName.trim().split(/\s+/);
+    if (parts.length < 2) {
+      throw new Error("Invalid name format: must have first and last name");
+    }
+    
+    const lastName = parts.pop();
+    const firstName = parts.join(' ');
+    
+    return {
+      legalFirstName: firstName,
+      firstName: firstName,
+      lastName: lastName
+    };
+  }
+}
+
+/**
+ * Generate email address from first and last name
+ */
+function generateEmail(firstName, lastName) {
+  // Clean up names: lowercase, remove accents, special chars
+  const cleanFirstName = firstName.toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+  
+  const cleanLastName = lastName.toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+  
+  // Format 1: firstInitial+lastName@domain
+  const firstInitial = cleanFirstName.charAt(0);
+  const email1 = `${firstInitial}${cleanLastName}@${DOMAIN}`;
+  
+  // Format 2: firstName.lastName@domain
+  const email2 = `${cleanFirstName}.${cleanLastName}@${DOMAIN}`;
+  
+  // Try format 1 first
+  try {
+    AdminDirectory.Users.get(email1, {fields: 'primaryEmail'});
+    
+    // Format 1 exists, try format 2
+    try {
+      AdminDirectory.Users.get(email2, {fields: 'primaryEmail'});
+      
+      // Both formats exist, try with a numeric suffix
+      for (let i = 2; i < 10; i++) {
+        const emailWithSuffix = `${cleanFirstName}.${cleanLastName}${i}@${DOMAIN}`;
+        
+        try {
+          AdminDirectory.Users.get(emailWithSuffix, {fields: 'primaryEmail'});
+          // This email also exists, continue the loop
+        } catch (e) {
+          // Email doesn't exist, we can use it
+          return emailWithSuffix;
+        }
+      }
+      
+      // If all suffixes are taken, use a timestamp
+      const timestamp = new Date().getTime() % 1000;
+      return `${cleanFirstName}.${cleanLastName}.${timestamp}@${DOMAIN}`;
+      
+    } catch (e) {
+      // email2 doesn't exist, use it
+      return email2;
+    }
+  } catch (e) {
+    // email1 doesn't exist, use it
+    return email1;
+  }
+}
+
+/**
+ * Extract manager's email
+ */
+function getManagerEmail(managerCell) {
+  if (!managerCell) {
+    return null;
+  }
+  
+  // If it's a simple email string
+  if (typeof managerCell === 'string' && managerCell.includes('@')) {
+    return managerCell;
+  }
+  
+  // Try to extract from text
+  if (typeof managerCell === 'string') {
+    // Try to match email pattern
+    const emailRegex = /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+)/;
+    const match = managerCell.match(emailRegex);
+    
+    if (match && match[1]) {
+      return match[1];
+    }
+    
+    // If no email pattern, try to look up by name
+    try {
+      const nameText = managerCell.toString().trim();
+      
+      if (nameText) {
+        const query = `name='${nameText}'`;
+        const response = AdminDirectory.Users.list({
+          domain: DOMAIN,
+          query: query,
+          maxResults: 1,
+          fields: 'users(primaryEmail)'
+        });
+        
+        if (response.users && response.users.length > 0) {
+          return response.users[0].primaryEmail;
+        }
+      }
+    } catch (e) {
+      Logger.log(`Error finding manager by name: ${e.message}`);
+    }
+  }
+  
+  return null;
+}
+
+/**
+ * Set manager for a user
+ */
+function setManager(userEmail, managerEmail) {
+  if (!managerEmail) {
+    return;
+  }
+  
+  try {
+    Utilities.sleep(2000); // Wait for user creation to complete
+    
+    const relations = {
+      "relations": [{
+        "type": "manager",
+        "value": managerEmail
+      }]
+    };
+    AdminDirectory.Users.update(relations, userEmail);
+    Logger.log(`Set manager ${managerEmail} for ${userEmail}`);
+  } catch (error) {
+    Logger.log(`Error setting manager: ${error.message}`);
+  }
+}
+
+/**
+ * Generate a random password
+ */
+function generatePassword(length) {
+  const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()";
+  let password = "";
+  
+  for (let i = 0; i < length; i++) {
+    const randomIndex = Math.floor(Math.random() * charset.length);
+    password += charset.charAt(randomIndex);
+  }
+  
+  return password;
+}
+
+/**
+ * Add user to groups based on division and location
+ */
+function addToGroups(userEmail, division, location, title) {
+  try {
+    const divisionClean = division ? division.trim() : '';
+    const locationClean = location ? location.trim() : '';
+    const titleClean = title ? title.trim().toLowerCase() : '';
+    
+    // Array to hold all groups we need to add the user to
+    const groupsToAdd = [];
+    
+    // Everyone gets added to team@company.com
+    groupsToAdd.push('team@company.com')
+    
+    // Add division-specific groups
+    if (divisionClean === 'A&A') {
+      groupsToAdd.push('development@company.com');
+    } 
+    else if (divisionClean === 'Hardware / Operations / Systems & Safety') {
+      groupsToAdd.push('hardware-team@company.com');
+    }
+    else if (divisionClean === 'Software' || divisionClean === 'Software') {
+      groupsToAdd.push('development@company.com');
+    }
+    else if (divisionClean === 'Operations') {
+      groupsToAdd.push('operations@company.com');
+    }
+    else if (divisionClean === 'Commercial') {
+      groupsToAdd.push('commercial@company.com');
+    }
+    else if (divisionClean === 'Places') {
+      groupsToAdd.push('facilities@company.com');
+    }
+    else if (divisionClean === 'Finance') {
+      groupsToAdd.push('finance@company.com');
+    }
+    else if (divisionClean === 'People') {
+      groupsToAdd.push('hr@company.com');
+    }
+    else if (divisionClean === 'Legal') {
+      groupsToAdd.push('legal@company.com');
+    }
+    else if (divisionClean === 'Product') {
+      groupsToAdd.push('product@company.com');
+    }
+    
+    // Add title-specific groups
+    if (titleClean.includes('developer')) {
+      if (!groupsToAdd.includes('development@company.com')) {
+        groupsToAdd.push('development@company.com');
+      }
+    }
+    
+    // Add location-specific groups
+    if (locationClean.includes('Toronto') || locationClean.includes('Remote: Canada')) {
+      groupsToAdd.push('company-can@company.com');
+    }
+    else if (locationClean.includes('San Francisco')) {
+      groupsToAdd.push('company-usa@company.com');
+      groupsToAdd.push('company-west@company.com');
+    }
+    else if (locationClean.includes('Texas')) {
+      groupsToAdd.push('company-usa@company.com');
+      groupsToAdd.push('company-tx@company.com');
+    }
+    else if (locationClean.includes('Remote: US')) {
+      groupsToAdd.push('company-usa@company.com');
+    }
+    
+    // Add user to each group
+    Utilities.sleep(3000); // Wait for user creation to complete
+    
+    for (const groupEmail of groupsToAdd) {
+      try {
+        const member = {
+          email: userEmail,
+          role: 'MEMBER'
+        };
+        
+        AdminDirectory.Members.insert(member, groupEmail);
+        Logger.log(`Added ${userEmail} to ${groupEmail}`);
+      } catch (error) {
+        Logger.log(`Error adding to group ${groupEmail}: ${error.message}`);
+      }
+    }
+  } catch (error) {
+    Logger.log(`Error adding to groups: ${error.message}`);
+  }
+}
+
+/**
+ * Check if start date is within 15 days from today
+ */
+function isStartDateWithin15Days(startDateValue) {
+  // Handle empty or invalid dates
+  if (!startDateValue) {
+    return false;
+  }
+  
+  let startDate;
+  
+  // If startDateValue is already a Date object
+  if (startDateValue instanceof Date) {
+    startDate = startDateValue;
+  } 
+  // If it's a string, try to parse it
+  else if (typeof startDateValue === 'string') {
+    // Try different date formats
+    // MM/DD/YYYY
+    if (startDateValue.includes('/')) {
+      const parts = startDateValue.split('/');
+      startDate = new Date(parseInt(parts[2]), parseInt(parts[0]) - 1, parseInt(parts[1]));
+    } 
+    // YYYY-MM-DD
+    else if (startDateValue.includes('-')) {
+      startDate = new Date(startDateValue);
+    }
+    // Other formats can be added here
+  }
+  
+  // If we couldn't parse the date or it's invalid
+  if (!startDate || isNaN(startDate.getTime())) {
+    Logger.log(`Invalid start date: ${startDateValue}`);
+    return false;
+  }
+  
+  // Get today's date and reset time component
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  
+  // Reset time component of start date for accurate comparison
+  startDate.setHours(0, 0, 0, 0);
+  
+  // Calculate the difference in milliseconds
+  const diffTime = startDate.getTime() - today.getTime();
+  
+  // Convert to days
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  
+  // Return true if 0 <= diffDays <= 15
+  return diffDays >= 0 && diffDays <= 15;
+}
+
+/**
+ * Set up a time-based trigger to run this script automatically
+ */
+function setupDailyTrigger() {
+  // Delete any existing triggers
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'createNewUserAccounts') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  }
+  
+  // Create a new trigger to run daily
+  ScriptApp.newTrigger('createNewUserAccounts')
+    .timeBased()
+    .everyDays(1)
+    .atHour(9)  // 9:00 AM
+    .create();
+}
+
+/**
+ * List all OUs for reference
+ */
+function listAllOUs() {
+  try {
+    Logger.log("Listing all organizational units...");
+    const response = AdminDirectory.Orgunits.list('my_customer', {
+      type: 'all'
+    });
+    
+    if (response.organizationUnits && response.organizationUnits.length > 0) {
+      Logger.log(`Found ${response.organizationUnits.length} organizational units:`);
+      
+      response.organizationUnits.forEach(function(ou) {
+        Logger.log(`OU Name: ${ou.name}, OU Path: ${ou.orgUnitPath}, OU ID: ${ou.orgUnitId}`);
+      });
+    } else {
+      Logger.log("No organizational units found.");
+    }
+  } catch (error) {
+    Logger.log(`Error listing OUs: ${error.message}`);
+  }
+}
